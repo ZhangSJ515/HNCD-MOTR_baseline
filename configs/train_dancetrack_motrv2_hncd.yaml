@@ -1,0 +1,140 @@
+# @Description  : Config for MOTRv2+HNCD ablation.
+#                 MOTRv2-style architecture (QIMv2 + no merge_det_track) on top of MeMOTR's
+#                 DAB-Deformable-DETR base.  Intended to be compared against the MOTRv2
+#                 baseline (HOTA 69.9) on DanceTrack + CrowdHuman.
+#                 Differences vs configs/train_dancetrack.yaml:
+#                   - ARCH: motrv2  (selects QIMv2 instead of TIM)
+#                   - MERGE_DET_TRACK_LAYER: 0  (no MeMOTR-only first-layer trick)
+#                   - NUM_DET_QUERIES: 10  (MOTRv2-style: 10 base queries + N proposals)
+#                   - APPEND_CROWD: True  (DanceTrack + CrowdHuman, matches MOTRv2 baseline data)
+#                   - USE_PROPOSALS: True
+#                 Everything else inherits the MeMOTR defaults; DAB pretrained is reused
+#                 because MOTRv2 also adopts DAB-style 4D anchor queries.
+
+GIT_VERSION:
+
+MODE: train
+CONFIG_PATH:
+VISUALIZE: False
+AVAILABLE_GPUS: 0,1,2,3
+DEVICE: cuda
+OUTPUTS_DIR:
+USE_DISTRIBUTED: False
+USE_CHECKPOINT: True
+CHECKPOINT_LEVEL: 3
+RESUME:
+RESUME_SCHEDULER: True
+MULTI_CHECKPOINT: False
+
+# About submit
+SUBMIT_DIR:
+SUBMIT_MODEL:
+SUBMIT_DATA_SPLIT: test
+DET_SCORE_THRESH: 0.5
+TRACK_SCORE_THRESH: 0.5
+RESULT_SCORE_THRESH: 0.5
+MISS_TOLERANCE: 30
+USE_MOTION: False
+MOTION_MIN_LENGTH: 3
+MOTION_MAX_LENGTH: 5
+MOTION_LAMBDA: 0.5
+
+# About Evaluation
+EVAL_DIR:
+EVAL_MODE: specific
+EVAL_MODEL:
+EVAL_PORT:
+EVAL_THREADS: 1
+EVAL_DATA_SPLIT: val
+
+# About data processing
+DATASET: DanceTrack
+USE_MOTSYNTH:
+USE_CROWDHUMAN:
+MOTSYNTH_RATE:
+DATA_ROOT: /home/y23_zhanghaoyu/subject/datasets
+DATA_PATH:
+NUM_WORKERS: 4
+BATCH_SIZE: 1
+ACCUMULATION_STEPS: 1
+COCO_SIZE: False
+OVERFLOW_BBOX: False
+REVERSE_CLIP: 0.0
+
+# About model
+BACKBONE: resnet50
+HIDDEN_DIM: 256
+FFN_DIM: 2048
+NUM_FEATURE_LEVELS: 4
+NUM_HEADS: 8
+NUM_ENC_POINTS: 4
+NUM_DEC_POINTS: 4
+NUM_ENC_LAYERS: 6
+NUM_DEC_LAYERS: 6
+MERGE_DET_TRACK_LAYER: 0          # MOTRv2 has no first-layer det/track merge.
+ACTIVATION: ReLU
+RETURN_INTER_DEC: True
+EXTRA_TRACK_ATTN: False
+AUX_LOSS: True
+USE_DAB: True
+UPDATE_THRESH: 0.5
+LONG_MEMORY_LAMBDA: 0.01           # unused by QIM, kept for backward-compat with config schema.
+# Pretrain model
+PRETRAINED_MODEL: dab_deformable_detr.pth
+
+# Sampling setting
+# SAMPLE_STEPS: [6, 10, 14]
+# SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_STEPS: [10]
+SAMPLE_LENGTHS: [5, 5, 5, 5]
+SAMPLE_MODES: [random_interval]
+SAMPLE_INTERVALS: [10]
+
+# Training setting
+SEED: 42
+EPOCHS: 10
+ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
+DROPOUT: 0.0
+NUM_DET_QUERIES: 10                # MOTRv2-style: 10 base queries; the rest comes from proposals.
+# training augmentation
+TP_DROP_RATE: 0.0
+FP_INSERT_RATE: 0.0
+LR: 2.0e-4
+LR_BACKBONE: 2.0e-5
+LR_POINTS: 1.0e-5
+WEIGHT_DECAY: 0.0005
+CLIP_MAX_NORM: 0.1
+LR_SCHEDULER: MultiStep
+LR_DROP_RATE: 0.1
+LR_DROP_MILESTONES: [4]
+# DETR matcher
+MATCH_COST_CLASS: 2
+MATCH_COST_BBOX: 5
+MATCH_COST_GIOU: 2
+# DETR loss
+LOSS_WEIGHT_FOCAL: 2
+LOSS_WEIGHT_L1: 5
+LOSS_WEIGHT_GIOU: 2
+# Aux Loss Weight
+AUX_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0]
+
+# proposal (must be enabled for MOTRv2-style)
+USE_PROPOSALS: True
+DET_DB: /home/y23_zhanghaoyu/subject/datasets/det_db.json
+
+# architecture preset
+ARCH: motrv2
+
+# crowdhuman: MOTRv2 baseline trains on DanceTrack + CrowdHuman.
+APPEND_CROWD: True
+
+# CDN (HNCD)
+NUM_CDN_GROUP: 3
+ID_NOISE_RATIO: 0.3
+BOX_NOISE_SCALE: 0.4
+CDN_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+CDN_K: 5
+USE_TINY_NOISE: True
+
+# visualize
+SAVE_EMBEDDINGS_DIR:

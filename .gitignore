@@ -1,0 +1,9 @@
+.idea
+*.pth
+*.mp4
+*.pt
+.vscode
+__pycache__/
+*.py[cod]
+*$py.class
+outputs/
