@@ -1,4 +1,4 @@
-# @Author       : Ruopeng Gao
+# @Author       : zetton
 # @Description  : Config for training DanceTrack.
 #                 We change some parameters compared with our paper, looking forward more stable training convergence.
 

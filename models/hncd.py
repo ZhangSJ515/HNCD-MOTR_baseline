@@ -390,9 +390,19 @@ class HNCD(nn.Module):
         return query_embed
 
     def get_reference_points(self, tracks: list[TrackInstances], proposals=None):
-        if self.use_proposals and proposals is not None and len(proposals) > 0:
-            proposals = inverse_sigmoid(proposals).to(self.position.weight.device)
-            det_references = torch.cat([self.position.weight, proposals[:, :4]]).unsqueeze(0)
+        # When use_proposals=True we MUST always go through the (position, query_embed)
+        # branch — even if `proposals` happens to be empty for a particular frame —
+        # otherwise the set of trainable parameters used per iteration is not constant,
+        # and DDP `find_unused_parameters=True` raises
+        # "Expected to mark a variable ready only once" once a frame with empty
+        # proposals is sampled (this matches MOTRv2's behaviour, see
+        # MOTRv2/models/motr.py:_generate_empty_tracks).
+        if self.use_proposals:
+            if proposals is not None and len(proposals) > 0:
+                proposals = inverse_sigmoid(proposals).to(self.position.weight.device)
+                det_references = torch.cat([self.position.weight, proposals[:, :4]]).unsqueeze(0)
+            else:
+                det_references = self.position.weight.unsqueeze(0)
         else:
             det_references = self.get_det_reference_points().repeat(len(tracks), 1, 1)                      # (B, Nd, 2)
             if det_references.shape[-1] == 2:
@@ -408,8 +418,13 @@ class HNCD(nn.Module):
         Returns: (B, Nd+Nq, 2C)
         """
         if self.use_dab:
-            if self.use_proposals and proposals is not None and len(proposals) > 0:
-                det_query_embed = torch.cat([self.query_embed.weight, self.pos2posemb(proposals[:, 4:], self.hidden_dim).to(self.yolox_embed.weight.device) + self.yolox_embed.weight]).unsqueeze(0)
+            # Always pick the (query_embed, yolox_embed) branch when use_proposals=True,
+            # for the same DDP-stability reason as in get_reference_points above.
+            if self.use_proposals:
+                if proposals is not None and len(proposals) > 0:
+                    det_query_embed = torch.cat([self.query_embed.weight, self.pos2posemb(proposals[:, 4:], self.hidden_dim).to(self.yolox_embed.weight.device) + self.yolox_embed.weight]).unsqueeze(0)
+                else:
+                    det_query_embed = self.query_embed.weight.unsqueeze(0)
             else:
                 det_query_embed = self.det_query_embed
                 det_query_embed = det_query_embed.repeat(len(tracks), 1, 1)
