@@ -424,7 +424,16 @@ class HNCD(nn.Module):
                 if proposals is not None and len(proposals) > 0:
                     det_query_embed = torch.cat([self.query_embed.weight, self.pos2posemb(proposals[:, 4:], self.hidden_dim).to(self.yolox_embed.weight.device) + self.yolox_embed.weight]).unsqueeze(0)
                 else:
-                    det_query_embed = self.query_embed.weight.unsqueeze(0)
+                    # Use the 10 base queries when no proposals are present this frame.
+                    # We add a 0-multiplied "touch" of yolox_embed so that, even on frames
+                    # without proposals, yolox_embed stays in the autograd graph. Without
+                    # this, in a multi-frame clip whose frames mix empty/non-empty proposals
+                    # (typical when CrowdHuman is appended), yolox_embed would be
+                    # conditionally used and DDP `find_unused_parameters=True` would raise
+                    # "Expected to mark a variable ready only once" at backward time. The
+                    # 0-multiplier means the value is unchanged but the gradient path exists.
+                    det_query_embed = self.query_embed.weight.unsqueeze(0) \
+                                      + 0.0 * self.yolox_embed.weight.sum()
             else:
                 det_query_embed = self.det_query_embed
                 det_query_embed = det_query_embed.repeat(len(tracks), 1, 1)
