@@ -2,6 +2,8 @@
 # @Date         : 2022/11/21
 
 import os
+import json
+import shutil
 import yaml
 
 from torch.utils import tensorboard as tb
@@ -38,7 +40,8 @@ def evaluate(config: dict):
         metrics = eval_model(model=config["EVAL_MODEL"], eval_dir=eval_dir,
                              data_root=config['DATA_ROOT'], dataset_name=config["DATASET"], data_split=eval_split,
                              threads=config["EVAL_THREADS"], port=port, config_path=config["CONFIG_PATH"],
-                             use_proposals=use_proposals)
+                             use_proposals=use_proposals,
+                             save_embeddings_dir=config.get("SAVE_EMBEDDINGS_DIR"))
     elif config["EVAL_MODE"] == "continue":
         init_index = eval_states["NEXT_INDEX"]
         for i in range(init_index, 10000):
@@ -52,7 +55,8 @@ def evaluate(config: dict):
                         model=model, eval_dir=eval_dir,
                         data_root=config["DATA_ROOT"], dataset_name=config["DATASET"], data_split=eval_split,
                         threads=config["EVAL_THREADS"], port=port, config_path=config["CONFIG_PATH"],
-                        use_proposals=use_proposals
+                        use_proposals=use_proposals,
+                        save_embeddings_dir=config.get("SAVE_EMBEDDINGS_DIR")
                     )
                     metrics_to_tensorboard(writer=tb_writer, metrics=metrics, epoch=i)
                 eval_states["NEXT_INDEX"] = i + 1
@@ -68,24 +72,37 @@ def evaluate(config: dict):
 
 
 def eval_model(model: str, eval_dir: str, data_root: str, dataset_name: str, data_split: str, threads: int, port: int,
-               config_path: str, use_proposals: bool = True):
+               config_path: str, use_proposals: bool = True, save_embeddings_dir: str = None):
     print(f"===>  Running checkpoint '{model}'")
 
     use_proposals_flag = "--use-proposals" if use_proposals else ""
+    save_embeddings_flag = ""
+    if save_embeddings_dir:
+        model_embeddings_dir = os.path.join(save_embeddings_dir, model.split(".")[0])
+        save_embeddings_flag = f"--save-embeddings-dir {model_embeddings_dir}"
     if threads > 1:
         os.system(f"python -m torch.distributed.run --nproc_per_node={str(threads)} --master_port={port} "
                   f"main.py --mode submit --submit-dir {eval_dir} --submit-model {model} "
                   f"--data-root {data_root} --submit-data-split {data_split} "
-                  f"--use-distributed --config-path {config_path} {use_proposals_flag}")
+                  f"--use-distributed --config-path {config_path} {use_proposals_flag} {save_embeddings_flag}")
     else:
         os.system(f"python main.py --mode submit --submit-dir {eval_dir} --submit-model {model} "
                   f"--data-root {data_root} --submit-data-split {data_split} --config-path {config_path} "
-                  f"{use_proposals_flag}")
+                  f"{use_proposals_flag} {save_embeddings_flag}")
 
     # 将结果移动到对应的文件夹
     tracker_dir = os.path.join(eval_dir, data_split, "tracker")
     tracker_mv_dir = os.path.join(eval_dir, data_split, model.split(".")[0] + "_tracker")
     os.system(f"mv {tracker_dir} {tracker_mv_dir}")
+
+    runtime_metrics = {}
+    runtime_dir = os.path.join(eval_dir, data_split, "runtime_stats")
+    if os.path.isdir(runtime_dir):
+        runtime_mv_dir = os.path.join(eval_dir, data_split, model.split(".")[0] + "_runtime_stats")
+        if os.path.exists(runtime_mv_dir):
+            shutil.rmtree(runtime_mv_dir)
+        shutil.move(runtime_dir, runtime_mv_dir)
+        runtime_metrics = aggregate_runtime_stats(runtime_mv_dir)
 
     # 进行指标计算
     data_dir = os.path.join(data_root, dataset_name)
@@ -127,7 +144,68 @@ def eval_model(model: str, eval_dir: str, data_root: str, dataset_name: str, dat
     metrics = {
         n: float(v) for n, v in zip(metric_names, metric_values)
     }
+    metrics.update(runtime_metrics)
     return metrics
+
+
+def aggregate_runtime_stats(runtime_dir: str) -> dict:
+    stat_paths = [
+        os.path.join(runtime_dir, name)
+        for name in os.listdir(runtime_dir)
+        if name.endswith(".json")
+    ]
+    if not stat_paths:
+        return {}
+
+    total_frames = 0
+    total_time_sec = 0.0
+    model_time_sec = 0.0
+    track_time_sec = 0.0
+    result_time_sec = 0.0
+    per_sequence = []
+
+    for stat_path in stat_paths:
+        with open(stat_path, "r", encoding="utf-8") as f:
+            stat = json.load(f)
+        per_sequence.append(stat)
+        total_frames += int(stat.get("num_frames", 0))
+        total_time_sec += float(stat.get("total_time_sec", 0.0))
+        model_time_sec += float(stat.get("model_time_sec", 0.0))
+        track_time_sec += float(stat.get("track_time_sec", 0.0))
+        result_time_sec += float(stat.get("result_time_sec", 0.0))
+
+    if total_frames == 0 or total_time_sec <= 0:
+        return {}
+
+    summary = {
+        "NUM_FRAMES": float(total_frames),
+        "FPS": float(total_frames / total_time_sec),
+        "AVG_TOTAL_MS": float(total_time_sec / total_frames * 1000.0),
+        "AVG_MODEL_MS": float(model_time_sec / total_frames * 1000.0),
+        "AVG_TRACK_MS": float(track_time_sec / total_frames * 1000.0),
+        "AVG_RESULT_MS": float(result_time_sec / total_frames * 1000.0),
+    }
+
+    with open(os.path.join(runtime_dir, "runtime_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "summary": summary,
+                "per_sequence": sorted(per_sequence, key=lambda x: x.get("seq_name", "")),
+            },
+            f,
+            indent=2,
+            ensure_ascii=False
+        )
+
+    print(
+        "===>  Runtime summary: "
+        f"FPS={summary['FPS']:.2f}, "
+        f"avg_total={summary['AVG_TOTAL_MS']:.2f} ms, "
+        f"avg_model={summary['AVG_MODEL_MS']:.2f} ms, "
+        f"avg_track={summary['AVG_TRACK_MS']:.2f} ms, "
+        f"avg_result={summary['AVG_RESULT_MS']:.2f} ms"
+    )
+    return summary
 
 
 def metrics_to_tensorboard(writer: tb.SummaryWriter, metrics: dict, epoch: int):

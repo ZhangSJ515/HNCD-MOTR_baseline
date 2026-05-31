@@ -10,7 +10,7 @@ VISUALIZE: False
 AVAILABLE_GPUS: 0,1,2,3
 DEVICE: cuda
 OUTPUTS_DIR:
-USE_DISTRIBUTED: False
+USE_DISTRIBUTED: True
 USE_CHECKPOINT: True
 CHECKPOINT_LEVEL: 3               # gradient checkpoint level.
                                   # As the number increases (from 1 to 4), the memory cost increases.
@@ -77,19 +77,19 @@ LONG_MEMORY_LAMBDA: 0.01
 PRETRAINED_MODEL: dab_deformable_detr.pth
 
 # Sampling setting
-SAMPLE_STEPS: [6, 10, 14]
-SAMPLE_LENGTHS: [2, 3, 4, 5]
-# SAMPLE_STEPS: [10]
-# SAMPLE_LENGTHS: [5, 5, 5, 5]
+# SAMPLE_STEPS: [6, 10, 14]
+# SAMPLE_LENGTHS: [2, 3, 4, 5]
+SAMPLE_STEPS: [10]
+SAMPLE_LENGTHS: [5, 5, 5, 5]
 SAMPLE_MODES: [random_interval]
 SAMPLE_INTERVALS: [10]
 
 # Training setting
 SEED: 42
-EPOCHS: 20
+EPOCHS: 8
 ONLY_TRAIN_QUERY_UPDATER_AFTER: 20
 DROPOUT: 0.0
-NUM_DET_QUERIES: 300
+NUM_DET_QUERIES: 10
 # training augmentation
 TP_DROP_RATE: 0.0
 FP_INSERT_RATE: 0.0
@@ -100,7 +100,7 @@ WEIGHT_DECAY: 0.0005
 CLIP_MAX_NORM: 0.1
 LR_SCHEDULER: MultiStep
 LR_DROP_RATE: 0.1
-LR_DROP_MILESTONES: [12]
+LR_DROP_MILESTONES: [4]
 # DETR matcher
 MATCH_COST_CLASS: 2
 MATCH_COST_BBOX: 5
@@ -121,7 +121,7 @@ DET_DB: /home/y23_zhanghaoyu/subject/datasets/det_db.json
 ARCH: memotr
 
 # crowdhuman
-APPEND_CROWD: False
+APPEND_CROWD: True
 
 # CDN
 NUM_CDN_GROUP: 3
@@ -129,7 +129,12 @@ ID_NOISE_RATIO: 0.3
 BOX_NOISE_SCALE: 0.4
 CDN_LOSS_WEIGHT: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
 CDN_K: 5
-USE_TINY_NOISE: True
+# Full HNCD:          CDN_NEGATIVE_SOURCE=knn,       CDN_REPLACED_NOISE_MODE=reduced
+# Ablation A (KNN):   CDN_NEGATIVE_SOURCE=knn,       CDN_REPLACED_NOISE_MODE=standard
+# Ablation B (noise): CDN_NEGATIVE_SOURCE=random_gt, CDN_REPLACED_NOISE_MODE=reduced
+CDN_NEGATIVE_SOURCE: random_gt
+CDN_REPLACED_NOISE_MODE: reduced
+CDN_REPLACED_NOISE_SCALE: 0.04
 
 # visualize
 SAVE_EMBEDDINGS_DIR:

@@ -5,6 +5,48 @@ from utils.box_ops import box_cxcywh_to_xyxy, box_xyxy_to_cxcywh
 from utils.utils import inverse_sigmoid
 
 
+def _canonicalize_negative_source(source: str, use_tiny_noise: bool) -> str:
+    """Resolve the hard-negative source with backward-compatible fallback."""
+    if source is None:
+        return "knn" if use_tiny_noise else "nearest"
+
+    source = str(source).strip().lower()
+    alias_map = {
+        "knn": "knn",
+        "knn_random": "knn",
+        "knn_random_sampling": "knn",
+        "nearest": "nearest",
+        "single_nearest": "nearest",
+        "random_gt": "random_gt",
+        "random": "random_gt",
+        "random_sampling": "random_gt",
+    }
+    if source not in alias_map:
+        raise ValueError(f"Unsupported CDN_NEGATIVE_SOURCE '{source}'.")
+    return alias_map[source]
+
+
+def _canonicalize_replaced_noise_mode(mode: str, use_tiny_noise: bool) -> str:
+    """Resolve the replaced-negative noise strategy with backward-compatible fallback."""
+    if mode is None:
+        return "reduced" if use_tiny_noise else "none"
+
+    mode = str(mode).strip().lower()
+    alias_map = {
+        "reduced": "reduced",
+        "tiny": "reduced",
+        "tiny_noise": "reduced",
+        "standard": "standard",
+        "full": "standard",
+        "standard_noise": "standard",
+        "none": "none",
+        "no_noise": "none",
+    }
+    if mode not in alias_map:
+        raise ValueError(f"Unsupported CDN_REPLACED_NOISE_MODE '{mode}'.")
+    return alias_map[mode]
+
+
 def get_contrastive_denoising_training_group(
     targets,
     num_classes,
@@ -15,7 +57,10 @@ def get_contrastive_denoising_training_group(
     id_noise_ratio=0.3,
     box_noise_scale=0.4,
     cdn_k=5,
-    use_tiny_noise=False
+    use_tiny_noise=False,
+    cdn_negative_source=None,
+    cdn_replaced_noise_mode=None,
+    cdn_replaced_noise_scale=None
 ):
     """
     Unified Contrastive Denoising (CDN) / Hard Negative Denoising (HND) Group Generator.
@@ -43,12 +88,23 @@ def get_contrastive_denoising_training_group(
             final sequence (det queries + proposal queries).
         num_queries_right (int): number of queries that come AFTER the CDN block (track
             queries).
-        cdn_k (int): The 'k' for K-NN sampling, only used if use_tiny_noise is True.
-        use_tiny_noise (bool): If True, enables HND multi-level noise + K-NN sampling.
-                                If False, reverts to the original CDN logic.
+        cdn_k (int): The 'k' for K-NN sampling when the negative source is K-NN.
+        use_tiny_noise (bool): Legacy fallback flag retained for backward compatibility.
+        cdn_negative_source (str): One of {"knn", "nearest", "random_gt"}.
+        cdn_replaced_noise_mode (str): One of {"reduced", "standard", "none"}.
+        cdn_replaced_noise_scale (float): Explicit hard-negative noise scale used when
+            cdn_replaced_noise_mode == "reduced". If None, falls back to the legacy
+            0.1 * box_noise_scale behavior.
     """
     if num_cdn_group <= 0:
         return None, None, None, None
+
+    negative_source = _canonicalize_negative_source(cdn_negative_source, use_tiny_noise)
+    replaced_noise_mode = _canonicalize_replaced_noise_mode(cdn_replaced_noise_mode, use_tiny_noise)
+    if cdn_replaced_noise_scale is None:
+        replaced_noise_scale = box_noise_scale * 0.1
+    else:
+        replaced_noise_scale = float(cdn_replaced_noise_scale)
 
     # --- Section 1, 2, 3: Data Preparation and Masking ---
     num_group = num_cdn_group
@@ -134,7 +190,7 @@ def get_contrastive_denoising_training_group(
         idx_in_batch = dn_positive_idx_flat[dn_positive_idx_flat[:, 0] == b, 1]
         dn_positive_idx.append(idx_in_batch)
 
-    # --- Section 4: Hard Negative Generation (Controlled by use_tiny_noise) ---
+    # --- Section 4: Hard Negative Generation ---
     replace_mask = (
         (torch.rand(bs, num_denoising, device=device) < id_noise_ratio)
         & neg_mask
@@ -151,17 +207,21 @@ def get_contrastive_denoising_training_group(
         pairwise_dist = torch.cdist(gt_centers, gt_centers, p=2.0)
         pairwise_dist.fill_diagonal_(float("inf"))
 
-        if use_tiny_noise:
-            # HND Logic: K-NN Random Sampling
+        if negative_source == "knn":
             k_for_topk = min(cdn_k, num_gt - 1)
             if k_for_topk == 0:
                 continue
             _, topk_indices = torch.topk(pairwise_dist, k=k_for_topk, dim=1, largest=False)
             random_choice = torch.randint(k_for_topk, size=(num_gt,), device=device)
             nearest_gt_indices = topk_indices[torch.arange(num_gt, device=device), random_choice]
-        else:
-            # Original CDN Logic: Single Nearest Neighbor
+        elif negative_source == "nearest":
             nearest_gt_indices = torch.argmin(pairwise_dist, dim=1)
+        elif negative_source == "random_gt":
+            random_choice = torch.randint(num_gt - 1, size=(num_gt,), device=device)
+            gt_indices = torch.arange(num_gt, device=device)
+            nearest_gt_indices = random_choice + (random_choice >= gt_indices).long()
+        else:
+            raise ValueError(f"Unsupported negative source '{negative_source}'.")
 
         to_replace_indices_batch = torch.nonzero(replace_mask[b]).squeeze(-1)
         for neg_idx_tiled in to_replace_indices_batch:
@@ -172,49 +232,61 @@ def get_contrastive_denoising_training_group(
             nearest_gt_box = current_gt_boxes[nearest_idx_orig]
             input_query_bbox[b, neg_idx_tiled] = nearest_gt_box
 
-    # --- Section 5: Noise Injection (Controlled by use_tiny_noise) ---
+    # --- Section 5: Noise Injection ---
     if box_noise_scale > 0:
         known_bbox_xyxy = box_cxcywh_to_xyxy(input_query_bbox)
+        whwh = torch.cat([input_query_bbox[..., 2:], input_query_bbox[..., 2:]], dim=-1)
+        diff = whwh * 0.5
+        rand_sign = (torch.randint_like(input_query_bbox, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0)
+        rand_part = torch.rand_like(input_query_bbox)
 
-        if use_tiny_noise:
-            # HND Logic: Multi-level Noise
-            whwh = torch.cat([input_query_bbox[..., 2:], input_query_bbox[..., 2:]], dim=-1)
-            diff = whwh * 0.5
-            rand_sign = (torch.randint_like(input_query_bbox, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0)
-            rand_part = torch.rand_like(input_query_bbox)
-            non_replaced_neg_mask = neg_mask & (~replace_mask) & pad_gt_mask
-            rand_part = torch.where(non_replaced_neg_mask.unsqueeze(-1), rand_part + 1.0, rand_part)
-            noise = rand_part * rand_sign * diff
-            noise_scale_factor = torch.full_like(input_query_bbox, box_noise_scale)
-            tiny_noise_scale = box_noise_scale * 0.1
+        positive_mask = (~neg_mask) & pad_gt_mask
+        replaced_neg_mask = replace_mask & pad_gt_mask
+        non_replaced_neg_mask = neg_mask & (~replace_mask) & pad_gt_mask
+
+        noise_application_mask = positive_mask | non_replaced_neg_mask
+        noise_scale_factor = torch.zeros_like(input_query_bbox)
+        noise_scale_factor = torch.where(
+            noise_application_mask.unsqueeze(-1),
+            torch.full_like(noise_scale_factor, box_noise_scale),
+            noise_scale_factor
+        )
+
+        shifted_rand_part = rand_part.clone()
+        negative_standard_mask = non_replaced_neg_mask
+
+        if replaced_noise_mode == "reduced":
+            noise_application_mask = noise_application_mask | replaced_neg_mask
             noise_scale_factor = torch.where(
-                replace_mask.unsqueeze(-1),
-                torch.full_like(noise_scale_factor, tiny_noise_scale),
+                replaced_neg_mask.unsqueeze(-1),
+                torch.full_like(noise_scale_factor, replaced_noise_scale),
                 noise_scale_factor
             )
-            final_noise = noise * noise_scale_factor
-            noise_application_mask = pad_gt_mask
-            final_bbox_xyxy = torch.where(
-                noise_application_mask.unsqueeze(-1),
-                known_bbox_xyxy + final_noise,
-                known_bbox_xyxy,
+        elif replaced_noise_mode == "standard":
+            noise_application_mask = noise_application_mask | replaced_neg_mask
+            noise_scale_factor = torch.where(
+                replaced_neg_mask.unsqueeze(-1),
+                torch.full_like(noise_scale_factor, box_noise_scale),
+                noise_scale_factor
             )
+            negative_standard_mask = negative_standard_mask | replaced_neg_mask
+        elif replaced_noise_mode == "none":
+            pass
         else:
-            # Original CDN Logic: No noise on replaced boxes
-            whwh = torch.cat([input_query_bbox[..., 2:], input_query_bbox[..., 2:]], dim=-1)
-            diff = whwh * 0.5 * box_noise_scale
-            rand_sign = (torch.randint_like(input_query_bbox, low=0, high=2, dtype=torch.float32) * 2.0 - 1.0)
-            rand_part = torch.rand_like(input_query_bbox)
-            non_replaced_neg_mask = neg_mask & (~replace_mask) & pad_gt_mask
-            rand_part = torch.where(non_replaced_neg_mask.unsqueeze(-1), rand_part + 1.0, rand_part)
-            noise = rand_part * rand_sign * diff
-            positive_mask = (~neg_mask) & pad_gt_mask
-            noise_application_mask = positive_mask | non_replaced_neg_mask
-            final_bbox_xyxy = torch.where(
-                noise_application_mask.unsqueeze(-1),
-                known_bbox_xyxy + noise,
-                known_bbox_xyxy,
-            )
+            raise ValueError(f"Unsupported replaced noise mode '{replaced_noise_mode}'.")
+
+        shifted_rand_part = torch.where(
+            negative_standard_mask.unsqueeze(-1),
+            shifted_rand_part + 1.0,
+            shifted_rand_part
+        )
+        noise = shifted_rand_part * rand_sign * diff
+        final_noise = noise * noise_scale_factor
+        final_bbox_xyxy = torch.where(
+            noise_application_mask.unsqueeze(-1),
+            known_bbox_xyxy + final_noise,
+            known_bbox_xyxy,
+        )
 
         # Common post-processing for both versions
         final_bbox_xyxy = torch.clamp(final_bbox_xyxy, min=0.0, max=1.0)

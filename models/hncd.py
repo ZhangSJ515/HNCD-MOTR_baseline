@@ -39,6 +39,9 @@ class HNCD(nn.Module):
                  visualize: bool = False, det_db=None,
                  num_cdn_group: int = 3, id_noise_ratio: float = 0.3,
                  box_noise_scale: float = 0.4, cdn_k: int = 3, use_tiny_noise: bool = True,
+                 cdn_negative_source: str = None,
+                 cdn_replaced_noise_mode: str = None,
+                 cdn_replaced_noise_scale: float = None,
                  use_proposals: bool = True):
         super(HNCD, self).__init__()
 
@@ -61,6 +64,11 @@ class HNCD(nn.Module):
         self.id_noise_ratio = id_noise_ratio
         self.box_noise_scale = box_noise_scale
         self.cdn_k = cdn_k
+        self.cdn_negative_source = cdn_negative_source
+        self.cdn_replaced_noise_mode = cdn_replaced_noise_mode
+        self.cdn_replaced_noise_scale = cdn_replaced_noise_scale
+        # Backward-compatibility fallback for older configs. New experiments should
+        # use the explicit source/noise knobs above instead of this legacy flag.
         self.use_tiny_noise = use_tiny_noise
         if num_cdn_group > 0:
             self.denoising_class_embed = nn.Embedding(
@@ -194,7 +202,10 @@ class HNCD(nn.Module):
                                                         self.id_noise_ratio,
                                                         self.box_noise_scale,
                                                         self.cdn_k,
-                                                        self.use_tiny_noise
+                                                        self.use_tiny_noise,
+                                                        self.cdn_negative_source,
+                                                        self.cdn_replaced_noise_mode,
+                                                        self.cdn_replaced_noise_scale
                                                     )
             if denoising_bbox_unact is not None:
                 num_cdn = denoising_logits.shape[1] # 获取cdn数量
@@ -509,6 +520,9 @@ def build(config: dict):
         id_noise_ratio=config["ID_NOISE_RATIO"],
         box_noise_scale=config["BOX_NOISE_SCALE"],
         cdn_k=config["CDN_K"],
-        use_tiny_noise=config['USE_TINY_NOISE'],
+        cdn_negative_source=config.get("CDN_NEGATIVE_SOURCE"),
+        cdn_replaced_noise_mode=config.get("CDN_REPLACED_NOISE_MODE"),
+        cdn_replaced_noise_scale=config.get("CDN_REPLACED_NOISE_SCALE"),
+        use_tiny_noise=config.get("USE_TINY_NOISE", False),
         use_proposals=config.get("USE_PROPOSALS", True)
     )

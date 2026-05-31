@@ -42,6 +42,8 @@ def parse_option():
     parser.add_argument("--eval-threads", type=int)
     parser.add_argument("--eval-port", type=int)
     parser.add_argument("--eval-data-split", type=str)
+    parser.add_argument("--save-embeddings-dir", type=str,
+                        help="Optional directory for exporting per-frame track embeddings during eval/submit.")
 
     # Pretrained Model Load:
     parser.add_argument("--pretrained-model", type=str, help="Pretrained model path.")

@@ -1,6 +1,8 @@
 # Copyright (c) Ruopeng Gao. All Rights Reserved.
 import os
 import json
+import time
+import pickle
 import torch
 import torch.nn as nn
 
@@ -51,13 +53,20 @@ class Submitter:
         self.use_motion = use_motion
         self.visualize = visualize
 
-        # NOTE 保存轨迹嵌入
+        self.runtime_stats_dir = path.join(self.outputs_dir, "runtime_stats")
+
+        # Optional embedding export for offline analysis.
         self.save_embeddings_dir = save_embeddings_dir
         if self.save_embeddings_dir is not None:
-            self.embedding_outputs = []
+            self.embedding_outputs = {
+                "seq_name": self.seq_name,
+                "seq_name_safe": self.seq_name_safe,
+                "frames": []
+            }
 
         # 对路径进行一些操作
         os.makedirs(self.predict_dir, exist_ok=True)
+        os.makedirs(self.runtime_stats_dir, exist_ok=True)
         if os.path.exists(os.path.join(self.predict_dir, f'{self.seq_name_safe}.txt')):
             os.remove(os.path.join(self.predict_dir, f'{self.seq_name_safe}.txt'))
         self.model.eval()
@@ -69,34 +78,34 @@ class Submitter:
                                  num_classes=get_model(self.model).num_classes,
                                  use_dab=self.use_dab).to(self.device)]
         bdd100k_results = []    # for bdd100k, will be converted into json file, different from other datasets.
+        total_time_sec = 0.0
+        model_time_sec = 0.0
+        track_time_sec = 0.0
+        result_time_sec = 0.0
+        num_frames = 0
         for i, ((image, ori_image, proposals), info) in enumerate(tqdm(self.dataloader, desc=f"Submit seq: {self.seq_name}")):
             # image: (1, C, H, W); ori_image: (1, H, W, C)
             frame_idx = i + 1
+            num_frames += 1
+
+            self._sync_device()
+            frame_start = time.perf_counter()
             frame = tensor_list_to_nested_tensor([image[0]]).to(self.device)
+
+            self._sync_device()
+            model_start = time.perf_counter()
             res = self.model(frame=frame, tracks=tracks, proposals=proposals)
+            self._sync_device()
+            model_time_sec += time.perf_counter() - model_start
+
+            track_start = time.perf_counter()
             previous_tracks, new_tracks = self.tracker.update(
                 model_outputs=res,
                 tracks=tracks
             )
             tracks: List[TrackInstances] = get_model(self.model).postprocess_single_frame(previous_tracks, new_tracks, None)
-
-            # NOTE save track embedding
-            if self.save_embeddings_dir:
-                # 我们保存当前帧所有有效轨迹的 'output_embed'
-                # 这是最能代表每个轨迹在当前帧状态的特征向量
-                final_tracks = tracks[0] # batch size is 1
-                if len(final_tracks) > 0:
-                    track_ids = final_tracks.ids.cpu().numpy()
-                    # `output_embed` 是解码器输出后，被`tracker.update`保留下来的特征
-                    # 它是最能代表当前轨迹实例的特征
-                    embeddings = final_tracks.output_embed.detach().cpu().numpy()
-
-                    for j in range(len(track_ids)):
-                        self.embedding_outputs.append({
-                            'frame_id': frame_idx,
-                            'track_id': track_ids[j],
-                            'embedding': embeddings[j]
-                        })
+            self._sync_device()
+            track_time_sec += time.perf_counter() - track_start
 
             # We do not use this...
             # but I do not want to remove this part.
@@ -116,6 +125,7 @@ class Submitter:
             tracks_result = tracks[0].to(torch.device("cpu"))
             ori_h, ori_w = ori_image.shape[1], ori_image.shape[2]
             # box = [x, y, w, h]
+            result_start = time.perf_counter()
             tracks_result.area = tracks_result.boxes[:, 2] * ori_w * \
                                  tracks_result.boxes[:, 3] * ori_h
             tracks_result = self.filter_by_score(tracks_result, thresh=self.result_score_thresh)
@@ -123,10 +133,21 @@ class Submitter:
             # to xyxy:
             tracks_result.boxes = box_cxcywh_to_xyxy(tracks_result.boxes)
             tracks_result.boxes = (tracks_result.boxes * torch.as_tensor([ori_w, ori_h, ori_w, ori_h], dtype=torch.float))
+
+            if self.save_embeddings_dir:
+                self._record_frame_embeddings(
+                    tracks_result=tracks_result,
+                    frame_idx=frame_idx,
+                    ori_h=int(ori_h),
+                    ori_w=int(ori_w)
+                )
             if self.dataset_name == "BDD100K":
                 self.update_results(tracks_result=tracks_result, frame_idx=i, results=bdd100k_results, img_path=info[0])
             else:
                 self.write_results(tracks_result=tracks_result, frame_idx=i)
+            self._sync_device()
+            result_time_sec += time.perf_counter() - result_start
+            total_time_sec += time.perf_counter() - frame_start
 
             if self.visualize:
                 os.makedirs(f"./outputs/visualize_tmp/frame_{i+1}/", exist_ok=False)
@@ -143,19 +164,78 @@ class Submitter:
         if self.dataset_name == "BDD100K":
             with open(os.path.join(self.predict_dir, '{}.json'.format(self.seq_name)), 'w', encoding='utf-8') as f:
                 json.dump(bdd100k_results, f)
-        
-        # NOTE save track embedding
+
+        self._write_runtime_stats(
+            num_frames=num_frames,
+            total_time_sec=total_time_sec,
+            model_time_sec=model_time_sec,
+            track_time_sec=track_time_sec,
+            result_time_sec=result_time_sec
+        )
+
         if self.save_embeddings_dir:
-            import pickle
-            # 确保保存目录存在
             os.makedirs(self.save_embeddings_dir, exist_ok=True)
-            # 为每个视频序列创建一个独立的 .pkl 文件 (use seq_name_safe for file path)
             output_path = os.path.join(self.save_embeddings_dir, f"{self.seq_name_safe}_embeddings.pkl")
             with open(output_path, 'wb') as f:
                 pickle.dump(self.embedding_outputs, f)
             print(f"Track embeddings for sequence '{self.seq_name}' saved to {output_path}")
 
         return
+
+    def _sync_device(self):
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(self.device)
+
+    def _record_frame_embeddings(self, tracks_result: TrackInstances, frame_idx: int, ori_h: int, ori_w: int):
+        if len(tracks_result) > 0:
+            scores = torch.max(tracks_result.scores, dim=-1).values.detach().cpu().numpy()
+            track_ids = tracks_result.ids.detach().cpu().numpy()
+            boxes_xyxy = tracks_result.boxes.detach().cpu().numpy()
+            output_embeddings = tracks_result.output_embed.detach().cpu().numpy()
+            query_embed = tracks_result.query_embed
+            if query_embed.shape[-1] > tracks_result.hidden_dim:
+                query_embed = query_embed[:, -tracks_result.hidden_dim:]
+            query_embeddings = query_embed.detach().cpu().numpy()
+        else:
+            scores = torch.zeros((0,), dtype=torch.float32).numpy()
+            track_ids = torch.zeros((0,), dtype=torch.long).numpy()
+            boxes_xyxy = torch.zeros((0, 4), dtype=torch.float32).numpy()
+            output_embeddings = torch.zeros((0, tracks_result.hidden_dim), dtype=torch.float32).numpy()
+            query_embeddings = torch.zeros((0, tracks_result.hidden_dim), dtype=torch.float32).numpy()
+
+        self.embedding_outputs["frames"].append(
+            {
+                "frame_id": int(frame_idx),
+                "image_size": [int(ori_h), int(ori_w)],
+                "track_ids": track_ids,
+                "scores": scores,
+                "boxes_xyxy": boxes_xyxy,
+                "query_embeddings": query_embeddings,
+                "output_embeddings": output_embeddings,
+            }
+        )
+
+    def _write_runtime_stats(self, num_frames: int, total_time_sec: float,
+                             model_time_sec: float, track_time_sec: float, result_time_sec: float):
+        if num_frames <= 0:
+            return
+        stats = {
+            "seq_name": self.seq_name,
+            "seq_name_safe": self.seq_name_safe,
+            "num_frames": int(num_frames),
+            "total_time_sec": float(total_time_sec),
+            "model_time_sec": float(model_time_sec),
+            "track_time_sec": float(track_time_sec),
+            "result_time_sec": float(result_time_sec),
+            "fps": float(num_frames / total_time_sec) if total_time_sec > 0 else 0.0,
+            "avg_total_ms": float(total_time_sec / num_frames * 1000.0),
+            "avg_model_ms": float(model_time_sec / num_frames * 1000.0),
+            "avg_track_ms": float(track_time_sec / num_frames * 1000.0),
+            "avg_result_ms": float(result_time_sec / num_frames * 1000.0),
+        }
+        stat_path = os.path.join(self.runtime_stats_dir, f"{self.seq_name_safe}.json")
+        with open(stat_path, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)
 
     @staticmethod
     def filter_by_score(tracks: TrackInstances, thresh: float = 0.7):
