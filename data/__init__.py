@@ -7,6 +7,7 @@ from torch.utils.data import RandomSampler, SequentialSampler, DataLoader
 
 from .dancetrack import build as build_dancetrack
 from .airmot import build as build_airmot
+from .uadetrac import build as build_uadetrac
 from .mot17 import build as build_mot17
 from .bdd100k import build as build_bbd100k
 from .mot import MOTDataset
@@ -14,7 +15,18 @@ from .utils import collate_fn
 from utils.utils import is_distributed
 
 
+_UADETRAC_ALIASES = {"UA-DETRAC", "UADETRAC", "UA_DETRAC"}
+
+
 def build_dataset(config: dict, split: str) -> MOTDataset:
+    # UA-DETRAC is a one-class MOT dataset.  ``DATASET`` is intentionally kept
+    # as DanceTrack in the UA-DETRAC config so the original HNCD model/criterion
+    # retain their one-class heads without invasive changes.  DATASET_ADAPTER
+    # selects the actual loader.
+    dataset_adapter = config.get("DATASET_ADAPTER", config["DATASET"])
+    if dataset_adapter in _UADETRAC_ALIASES:
+        return build_uadetrac(config=config, split=split)
+
     if config["DATASET"] == "DanceTrack":
         return build_dancetrack(config=config, split=split)
     elif config["DATASET"] == "SportsMOT":
