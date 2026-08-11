@@ -42,6 +42,7 @@ jobs:
             TrackEval/scripts/run_uadetrac.py \
             tools/convert_uadetrac_xml_to_mot.py \
             tools/build_uadetrac_det_db.py \
+            tools/convert_uadetrac_dab_pretrain.py \
             tools/check_uadetrac_setup.py \
             tools/smoke_test_uadetrac.py
 
@@ -49,6 +50,7 @@ jobs:
         run: |
           bash -n scripts/convert_uadetrac.sh
           bash -n scripts/build_uadetrac_det_db.sh
+          bash -n scripts/prepare_uadetrac_pretrain.sh
           bash -n scripts/check_uadetrac_setup.sh
           bash -n scripts/smoke_test_uadetrac.sh
           bash -n scripts/train_uadetrac.sh
