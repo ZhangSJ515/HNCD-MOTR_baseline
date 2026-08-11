@@ -69,9 +69,77 @@ DATADIR/
   └── det_db.json
 ```
 
+## UA-DETRAC adaptation
+
+The `feature/uadetrac-support` branch adds a complete HNCD-MOTR pipeline for single-class UA-DETRAC, including dataset conversion/loading, MOTRv2 proposal DB preparation, vehicle-specific DAB pretrain conversion, training, submission, native TrackEval evaluation, setup checks, and a synthetic smoke test.
+
+Canonical layout:
+
+```text
+/home/zsj/data/datasets/UA-DETRAC/
+├── train/<sequence>/{img1,gt/gt.txt,seqinfo.ini}
+└── test/<sequence>/{img1,gt/gt.txt,seqinfo.ini}
+```
+
+`UA-DETRAC`, `UADETRAC`, and `UA_DETRAC` directory aliases are accepted. All valid targets are mapped to the single `vehicle` class.
+
+Prepare/validate data:
+
+```shell
+# Convert official XML annotations.
+IMAGES_ROOT=/path/to/images \
+ANNOTATIONS_ROOT=/path/to/xml \
+OUTPUT_ROOT=/home/zsj/data/datasets/UA-DETRAC \
+SPLIT=train \
+bash scripts/convert_uadetrac.sh
+
+# Build HNCD/MOTRv2 proposal JSON from detector txt outputs.
+DATA_ROOT=/home/zsj/data/datasets \
+DETECTIONS_ROOT=/path/to/detector/results \
+OUTPUT=/home/zsj/data/datasets/uadetrac_yolox_det_db.json \
+bash scripts/build_uadetrac_det_db.sh
+
+# Convert the DAB COCO classifier from car -> single vehicle class.
+SOURCE_CHECKPOINT=/path/to/dab_deformable_detr_coco.pth \
+OUTPUT_CHECKPOINT=./pretrains/dab_deformable_detr_coco_uadetrac.pth \
+bash scripts/prepare_uadetrac_pretrain.sh
+
+# Validate data + proposal coverage.
+DATA_ROOT=/home/zsj/data/datasets \
+DET_DB=/home/zsj/data/datasets/uadetrac_yolox_det_db.json \
+bash scripts/check_uadetrac_setup.sh
+
+bash scripts/smoke_test_uadetrac.sh
+```
+
+Train:
+
+```shell
+NUM_GPUS=8 \
+GPU_IDS=0,1,2,3,4,5,6,7 \
+DATA_ROOT=/home/zsj/data/datasets \
+DET_DB=/home/zsj/data/datasets/uadetrac_yolox_det_db.json \
+PRETRAINED_MODEL=./pretrains/dab_deformable_detr_coco_uadetrac.pth \
+OUTPUTS_DIR=./outputs/hncd_uadetrac \
+bash scripts/train_uadetrac.sh
+```
+
+Evaluate:
+
+```shell
+EVAL_DIR=./outputs/hncd_uadetrac \
+MODEL_PATH=checkpoint_41.pth \
+DATA_ROOT=/home/zsj/data/datasets \
+DET_DB=/home/zsj/data/datasets/uadetrac_yolox_det_db.json \
+SPLIT=test \
+bash scripts/evaluate_uadetrac.sh
+```
+
+UA-DETRAC tracker results are written in standard MOTChallenge format and the native TrackEval adapter reports HOTA, CLEAR, and Identity metrics for `vehicle`. See [`docs/uadetrac_adaptation.md`](docs/uadetrac_adaptation.md) for the complete workflow and format details.
+
 ## Pretrain
 
-We initialize the model with the official DAB-Deformable-DETR R50 checkpoint pretrained on COCO. You can download the checkpoint used in our experiments [here](https://drive.google.com/file/d/17FxIGgIZJih8LWkGdlIOe9ZpVZ9IRxSj/view?usp=sharing), and place it at the root of this project directory.
+We initialize the original pedestrian/dance models with the official DAB-Deformable-DETR R50 checkpoint pretrained on COCO. You can download the checkpoint used in the original experiments [here](https://drive.google.com/file/d/17FxIGgIZJih8LWkGdlIOe9ZpVZ9IRxSj/view?usp=sharing). For UA-DETRAC, first run `scripts/prepare_uadetrac_pretrain.sh` so the one-class head is initialized from the COCO **car** classifier rather than the pedestrian classifier.
 
 ## Scripts on DanceTrack
 
@@ -143,4 +211,3 @@ The main implementation still uses:
 | Method    | HOTA | DetA | AssA | IDF1 | MOTA | Checkpoint                                                                                            |
 | --------- | ---: | ---: | ---: | ---: | ---: | ----------------------------------------------------------------------------------------------------- |
 | HNCD-MOTR | 71.7 | 84.2 | 61.2 | 73.4 | 92.5 | [Google Drive](https://drive.google.com/file/d/1H58SpBb_DcjvAvEPTo5BXnAki89UUxMG/view?usp=drive_link) |
-

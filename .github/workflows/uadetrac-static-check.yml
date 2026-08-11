@@ -1,0 +1,58 @@
+name: HNCD-MOTR UA-DETRAC static checks
+
+on:
+  push:
+    branches:
+      - feature/uadetrac-support
+  pull_request:
+    paths:
+      - 'configs/train_uadetrac_hncd.yaml'
+      - 'data/uadetrac.py'
+      - 'data/__init__.py'
+      - 'data/seq_dataset.py'
+      - 'main.py'
+      - 'uadetrac_submit_engine.py'
+      - 'uadetrac_eval_engine.py'
+      - 'TrackEval/trackeval/datasets/uadetrac.py'
+      - 'TrackEval/trackeval/datasets/__init__.py'
+      - 'TrackEval/scripts/run_uadetrac.py'
+      - 'tools/*uadetrac*.py'
+      - 'scripts/*uadetrac*.sh'
+      - '.github/workflows/uadetrac-static-check.yml'
+
+jobs:
+  syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Compile Python files
+        run: |
+          python -m py_compile \
+            main.py \
+            data/__init__.py \
+            data/uadetrac.py \
+            data/seq_dataset.py \
+            uadetrac_submit_engine.py \
+            uadetrac_eval_engine.py \
+            TrackEval/trackeval/datasets/uadetrac.py \
+            TrackEval/scripts/run_uadetrac.py \
+            tools/convert_uadetrac_xml_to_mot.py \
+            tools/build_uadetrac_det_db.py \
+            tools/convert_uadetrac_dab_pretrain.py \
+            tools/check_uadetrac_setup.py \
+            tools/smoke_test_uadetrac.py
+
+      - name: Validate shell launchers
+        run: |
+          bash -n scripts/convert_uadetrac.sh
+          bash -n scripts/build_uadetrac_det_db.sh
+          bash -n scripts/prepare_uadetrac_pretrain.sh
+          bash -n scripts/check_uadetrac_setup.sh
+          bash -n scripts/smoke_test_uadetrac.sh
+          bash -n scripts/train_uadetrac.sh
+          bash -n scripts/submit_uadetrac.sh
+          bash -n scripts/evaluate_uadetrac.sh

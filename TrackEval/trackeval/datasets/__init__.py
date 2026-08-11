@@ -8,3 +8,4 @@ from .tao import TAO
 from .youtube_vis import YouTubeVIS
 from .head_tracking_challenge import HeadTrackingChallenge
 from .rob_mots import RobMOTS
+from .uadetrac import UADETRAC
