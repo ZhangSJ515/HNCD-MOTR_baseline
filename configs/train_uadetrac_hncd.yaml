@@ -79,8 +79,9 @@ USE_DAB: True
 UPDATE_THRESH: 0.5
 LONG_MEMORY_LAMBDA: 0.01
 
-# Official DAB-Deformable-DETR R50 COCO checkpoint.
-PRETRAINED_MODEL: /path/to/dab_deformable_detr.pth
+# Prepare this file with scripts/prepare_uadetrac_pretrain.sh. The converter
+# maps the COCO car classifier row to the single UA-DETRAC vehicle class.
+PRETRAINED_MODEL: ./pretrains/dab_deformable_detr_coco_uadetrac.pth
 
 # Clip sampling. These are operational defaults, not claimed to be
 # UA-DETRAC-optimal hyperparameters.
